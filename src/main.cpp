@@ -1,28 +1,60 @@
 #include <Arduino.h>
 
 #define _EXTALLOC_DEBUGS_ENABLED
-#define _EXTALLOC_GAP_COUNT 128
+#define _EXTALLOC_BLOCKS_PER_ARR 256
+#define _EXTALLOC_CHUNK_SIZE 128
 
 extern "C" uint8_t external_psram_size;
 
 namespace extalloc {
-	struct gap {
-		union {
-			void* pointer = nullptr;
-			unsigned int pointer_ub_fuckery;
-		};
-		size_t size = 0;
+	#define block_int_t uint16_t
+
+	struct block {
+		/// Chunked block index. _EXTALLOC_CHUNK_SIZE*index + 0x7... = actual memory index
+		block_int_t index = 0;
+		/// Chunked block size. _EXTALLOC_CHUNK_SIZE*csize = actual size in bytes
+		block_int_t csize = 0;
 	};
 
-	struct gap_chunk {
-		gap_chunk* next = nullptr;
-		gap gaps[_EXTALLOC_GAP_COUNT]{};
+	class chained_block_arr {
+	public:
+		chained_block_arr* next_arr = nullptr;
+		uint8_t top = 0;
+		block blocks[_EXTALLOC_BLOCKS_PER_ARR]{};
+
+		void push(const block b) {
+			if (top == _EXTALLOC_BLOCKS_PER_ARR - 1) {
+				if (next_arr == nullptr) {
+					next_arr = static_cast<chained_block_arr*>(malloc(sizeof(chained_block_arr)));
+				}
+				next_arr->push(b);
+			} else {
+				blocks[top++] = b;
+			}
+		}
+
+		void remove(const uint8_t index) {
+			const auto length = top-index;
+			if (length > 0) {
+				// temporarily store the other part of the array
+				block temp[length];
+				memcpy(temp, &blocks[index+1], sizeof(block)*length);
+				// copy array backwards one place
+				memcpy(&blocks[index], &temp, sizeof(block)*length);
+			}
+			blocks[top--].csize = 0;
+		}
 	};
 
-	gap_chunk base_chunk{};
+	// In theory, you could probably infer gaps from allocations.
+	// However, I do not feel like doing that. I am too "eepy" to think this up.
+	chained_block_arr gap_arr{};
+
+	// TODO This should be a BST for quick searches in free()
+	chained_block_arr alloc_arr{};
 
 	bool memory_enable = false;
-	uint32_t *memory_begin, *memory_end;
+	//uint32_t *memory_begin, *memory_end; // literally never used
 
 	void init() {
 		const uint8_t size = external_psram_size;
@@ -46,37 +78,91 @@ namespace extalloc {
 
 		const unsigned int m_size_bytes = size * 1048576;
 
+		/*
 		memory_begin = reinterpret_cast<uint32_t*>(0x70000000); // memory start constant
 		memory_end = reinterpret_cast<uint32_t*>(0x70000000 + m_size_bytes);  // m start, 1MiB
+		*/
 
-		base_chunk.gaps[0].pointer = memory_begin;
-		base_chunk.gaps[0].size = m_size_bytes;
+		gap_arr.push({0, static_cast<block_int_t>(m_size_bytes/_EXTALLOC_CHUNK_SIZE)});
 	}
 
-	volatile void* alloc(size_t size) {
-		if (memory_enable) {
-			volatile void* result = nullptr;
-			gap_chunk* chunk = &base_chunk;
-			for (auto & gap : chunk->gaps) {
-				if (gap.size == size) {
-					gap.size = 0;
-					result = gap.pointer;
-				}
-				if (gap.size > size) {
-					gap.size -= size;
-					result = gap.pointer;
-					gap.pointer_ub_fuckery += size;
-				}
-			}
-			return result;
-		} else {
-			return malloc(size);
+	void check_for_next_block(chained_block_arr *&chunk, int &i) {
+		if (i == _EXTALLOC_BLOCKS_PER_ARR - 1 && chunk->next_arr != nullptr) {
+			chunk = chunk->next_arr;
+			i = -1;
 		}
+	}
+
+	volatile void* alloc(const size_t size) {
+		if (memory_enable) {
+			// Align upwards, then divide by chunk size.
+			const block_int_t csize = (size + size % _EXTALLOC_CHUNK_SIZE)/_EXTALLOC_CHUNK_SIZE;
+			block_int_t ret_idx = 0;
+
+			chained_block_arr* chunk = &gap_arr;
+			for (int i = 0; i < _EXTALLOC_BLOCKS_PER_ARR; i++) {
+				auto&[block_idx, block_size] = chunk->blocks[i];
+				if (block_size == csize) {
+					block_size = 0;
+					ret_idx = block_idx;
+					break;
+				}
+				if (block_size > csize) {
+					block_size -= csize;
+					ret_idx = block_idx;
+					block_idx += csize;
+					break;
+				}
+				check_for_next_block(chunk, i);
+			}
+
+			alloc_arr.push({ret_idx, csize});
+			return reinterpret_cast<uint32_t*>(0x70000000 + ret_idx*128);
+		}
+		return malloc(size);
 	}
 
 	void free(void* ptr) {
 		if (memory_enable) {
+			const auto index = static_cast<block_int_t>((*reinterpret_cast<uint32_t*>(&ptr)-0x70000000)/128);
+			block b{};
 
+			// Find the block ptr goes to
+			chained_block_arr* chunk = &alloc_arr;
+			for (int i = 0; i < _EXTALLOC_BLOCKS_PER_ARR; i++) {
+				if (chunk->blocks[i].index == index) {
+					b = chunk->blocks[i];
+					chunk->remove(i);
+					break;
+				}
+				check_for_next_block(chunk, i);
+			}
+			if (b.csize == 0) { return; } // Couldn't find it, and can't free a null pointer. Don't keep going
+
+			// Reset chunk so we traverse the gap array
+			chunk = &gap_arr;
+			for (int i = 0; i < _EXTALLOC_BLOCKS_PER_ARR; i++) {
+				// This defragmentation "fix" probably won't in most cases. Still helpful maybe
+
+				// Is this gap's end aligned with our start? If so, merge em
+				if (chunk->blocks[i].index + chunk->blocks[i].csize == b.index) {
+					chunk->blocks[i].csize += b.csize;
+					break;
+				}
+				// Is this gap's start aligned with our end? If so, merge
+				if (b.index + b.csize == chunk->blocks[i].index) {
+					chunk->blocks[i].index = b.index;
+					chunk->blocks[i].csize += b.csize;
+					break;
+				}
+
+				// We found a place to put this. Not necessarily the best place (see above), but *a* place.
+				if (chunk->blocks[i].csize == 0) {
+					chunk->blocks[i] = b;
+					break;
+				}
+				check_for_next_block(chunk, i);
+			}
 		} else {
 			::free(ptr);
 		}
