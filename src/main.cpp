@@ -87,7 +87,7 @@ namespace extalloc {
 	}
 
 	void check_for_next_block(chained_block_arr *&chunk, int &i) {
-		if (i == _EXTALLOC_BLOCKS_PER_ARR - 1 && chunk->next_arr != nullptr) {
+		if (i == chunk->top - 1 && chunk->next_arr != nullptr) {
 			chunk = chunk->next_arr;
 			i = -1;
 		}
@@ -96,28 +96,29 @@ namespace extalloc {
 	volatile void* alloc(const size_t size) {
 		if (memory_enable) {
 			// Align upwards, then divide by chunk size.
-			const block_int_t csize = (size + size % _EXTALLOC_CHUNK_SIZE)/_EXTALLOC_CHUNK_SIZE;
-			block_int_t ret_idx = 0;
+			const block_int_t csize = ((size-1) - (size-1) % _EXTALLOC_CHUNK_SIZE + _EXTALLOC_CHUNK_SIZE)/_EXTALLOC_CHUNK_SIZE;
 
 			chained_block_arr* chunk = &gap_arr;
-			for (int i = 0; i < _EXTALLOC_BLOCKS_PER_ARR; i++) {
-				auto&[block_idx, block_size] = chunk->blocks[i];
-				if (block_size == csize) {
-					block_size = 0;
-					ret_idx = block_idx;
+			block* lowest = &chunk->blocks[0];
+			for (int i = 0; i < chunk->top; i++) {
+				auto* block = &chunk->blocks[i];
+				if (block->csize == csize) { // perfec
+					lowest = block;
 					break;
 				}
-				if (block_size > csize) {
-					block_size -= csize;
-					ret_idx = block_idx;
-					block_idx += csize;
-					break;
+				if (block->csize <= lowest->csize && csize < block->csize) {
+					lowest = block;
 				}
 				check_for_next_block(chunk, i);
 			}
 
-			alloc_arr.push({ret_idx, csize});
-			return reinterpret_cast<uint32_t*>(0x70000000 + ret_idx*128);
+			lowest->csize -= csize;
+			const auto addr = reinterpret_cast<void*>(0x70000000 + lowest->index*128);
+			lowest->index += csize;
+
+			alloc_arr.push({lowest->index, csize});
+
+			return addr;
 		}
 		return malloc(size);
 	}
@@ -129,7 +130,7 @@ namespace extalloc {
 
 			// Find the block ptr goes to
 			chained_block_arr* chunk = &alloc_arr;
-			for (int i = 0; i < _EXTALLOC_BLOCKS_PER_ARR; i++) {
+			for (int i = 0; i < chunk->top; i++) {
 				if (chunk->blocks[i].index == index) {
 					b = chunk->blocks[i];
 					chunk->remove(i);
@@ -159,6 +160,7 @@ namespace extalloc {
 				// We found a place to put this. Not necessarily the best place (see above), but *a* place.
 				if (chunk->blocks[i].csize == 0) {
 					chunk->blocks[i] = b;
+					if (chunk->top <= i) chunk->top++;
 					break;
 				}
 				check_for_next_block(chunk, i);
