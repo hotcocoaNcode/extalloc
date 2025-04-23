@@ -2,8 +2,8 @@
 // Created by Ember Lee on 4/22/25.
 //
 
-#include <Arduino.h>
 #include "extalloc.h"
+#include <Arduino.h>
 
 extern "C" uint8_t external_psram_size;
 
@@ -38,7 +38,7 @@ namespace extalloc {
 			const auto length = top-index;
 			if (length > 0) {
 				// temporarily store the other part of the array
-				block temp[length];
+				block temp[_EXTALLOC_BLOCKS_PER_ARR]; // max size it could be
 				memcpy(temp, &blocks[index+1], sizeof(block)*length);
 				// copy array backwards one place
 				memcpy(&blocks[index], &temp, sizeof(block)*length);
@@ -59,8 +59,16 @@ namespace extalloc {
 
 	void init() {
 		const uint8_t size = external_psram_size;
+		if (size == 0) {
+			Serial.println("extalloc: No memory detected (0MiB)! Check chip and solder joints.");
+			Serial.println("extalloc: Defaulting to normal malloc()!");
+			return;
+		}
+
+		const unsigned int m_size_bytes = size * 1048576;
+
 #ifdef _EXTALLOC_DEBUGS_ENABLED
-		Serial.printf("extalloc: memory is %d MiB\n", size);
+		Serial.printf("extalloc: memory is %d MiB (%llu bytes)\n", size, m_size_bytes);
 
 		// Going to be honest here, not sure what this means at all.
 		// Probably useful info though. I think it's the SPI clock speed?
@@ -68,22 +76,7 @@ namespace extalloc {
 		const float frequency = clocks[(CCM_CBCMR >> 8) & 3] / static_cast<float>(((CCM_CBCMR >> 29) & 7) + 1);
 		Serial.printf("extalloc: CCM_CBCMR=%08X (%.1f MHz)\n", CCM_CBCMR, frequency);
 #endif
-
-		if (size == 0) {
-			Serial.println("extalloc: No memory detected (0MiB)! Check chip and solder joints.");
-			Serial.println("extalloc: Defaulting to normal malloc()!");
-			return;
-		}
-
 		memory_enable = true;
-
-		const unsigned int m_size_bytes = size * 1048576;
-
-		/*
-		memory_begin = reinterpret_cast<uint32_t*>(0x70000000); // memory start constant
-		memory_end = reinterpret_cast<uint32_t*>(0x70000000 + m_size_bytes);  // m start, 1MiB
-		*/
-
 		gap_arr.push({0, static_cast<block_int_t>(m_size_bytes/_EXTALLOC_CHUNK_SIZE)});
 	}
 
@@ -97,7 +90,8 @@ namespace extalloc {
 	volatile void* alloc(const size_t size) {
 		if (memory_enable) {
 			// Align upwards, then divide by chunk size.
-			const block_int_t csize = ((size-1) - (size-1) % _EXTALLOC_CHUNK_SIZE + _EXTALLOC_CHUNK_SIZE)/_EXTALLOC_CHUNK_SIZE;
+			const block_int_t csize = ((size-1) - (size-1) % _EXTALLOC_CHUNK_SIZE
+                                                   + _EXTALLOC_CHUNK_SIZE)/_EXTALLOC_CHUNK_SIZE;
 
 			chained_block_arr* chunk = &gap_arr;
 			block* lowest = &chunk->blocks[0];
@@ -107,7 +101,7 @@ namespace extalloc {
 					lowest = block;
 					break;
 				}
-				if (block->csize <= lowest->csize && csize < block->csize) {
+				if (block->csize <= lowest->csize && csize < block->csize) { // not perfect, but okay
 					lowest = block;
 				}
 				check_for_next_block(chunk, i);
@@ -158,7 +152,8 @@ namespace extalloc {
 					break;
 				}
 
-				// We found a place to put this. Not necessarily the best place (see above), but *a* place.
+				// We found a place to put this.
+                // Not necessarily the best place (see above), but *a* place.
 				if (chunk->blocks[i].csize == 0) {
 					chunk->blocks[i] = b;
 					if (chunk->top <= i) chunk->top++;
