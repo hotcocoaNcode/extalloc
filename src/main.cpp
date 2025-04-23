@@ -19,77 +19,36 @@ void check(volatile void* addr, const uint8_t value, const size_t size) {
 void setup()
 {
 	while (!Serial) ; // wait
-	extalloc::init();
 	ARM_DEMCR |= ARM_DEMCR_TRCENA;
 	ARM_DWT_CTRL |= ARM_DWT_CTRL_CYCCNTENA;
-
-	volatile void *a = extalloc::alloc(256);
-	volatile void *b = extalloc::alloc(256);
-	volatile void *c = extalloc::alloc(256);
-	volatile void *d = extalloc::alloc(256);
-
-	fill(a, 0, 256);
-	fill(b, 1, 256);
-	fill(c, 2, 256);
-	fill(d, 3, 256);
-
-	check(a, 0, 256);
-	check(b, 1, 256);
-	check(c, 2, 256);
-	check(d, 3, 256);
-
-	Serial.printf("a %08X, b %08X, c %08X, d %08X\n", a, b, c, d);
-
-	extalloc::free(c);
-
-
-
 	uint32_t c_start = ARM_DWT_CYCCNT;
-	volatile void *e = extalloc::alloc(128);
 	uint32_t c_end = ARM_DWT_CYCCNT;
-	Serial.printf("e's alloc took %lu cycles\n", c_end-c_start);
-	c_start = ARM_DWT_CYCCNT;
-	volatile void *f = extalloc::alloc(128);
-	c_end = ARM_DWT_CYCCNT;
-	Serial.printf("f's alloc took %lu cycles\n", c_end-c_start);
-
-	Serial.printf("e %08X, f %08X\n", e, f);
-
-
-	fill(e, 4, 128);
-	fill(f, 5, 128);
-
-	check(e, 4, 128);
-	check(f, 5, 128);
 
 	c_start = ARM_DWT_CYCCNT;
-	extalloc::free(a);
+	extalloc::init();
 	c_end = ARM_DWT_CYCCNT;
-	Serial.printf("a's free took %lu cycles\n", c_end-c_start);
+	Serial.printf("(our) init took %lu cycles\n", c_end-c_start);
 
-	c_start = ARM_DWT_CYCCNT;
-	extalloc::free(b);
-	extalloc::free(d);
-	extalloc::free(e);
-	extalloc::free(f);
-	c_end = ARM_DWT_CYCCNT;
-	Serial.printf("the rest took %lu cycles\n", c_end-c_start);
-
-
+	void* throwaway = extmem_malloc(128);
 	c_start = ARM_DWT_CYCCNT;
 	void* test = extmem_malloc(256);
 	c_end = ARM_DWT_CYCCNT;
 	Serial.printf("theirs took %lu cycles\n", c_end-c_start);
+	Serial.printf("sanity check; 0x%08X throwaway 0x%08X real\n", throwaway, test);
 	fill(test, 0, 256);
 
 	extmem_free(test);
+	extmem_free(throwaway);
 
+	volatile void* throwaway2 = extalloc::alloc(128);
 	c_start = ARM_DWT_CYCCNT;
 	volatile void* test2 = extalloc::alloc(256);
 	c_end = ARM_DWT_CYCCNT;
 	Serial.printf("ours took %lu cycles\n", c_end-c_start);
+	Serial.printf("sanity check; 0x%08X throwaway 0x%08X real\n", throwaway2, test2);
 	fill(test2, 0, 256);
 	extalloc::free(test2);
+	extalloc::free(throwaway2);
 }
 
 
