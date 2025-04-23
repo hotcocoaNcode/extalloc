@@ -74,6 +74,22 @@ void setup()
 	extalloc::free(f);
 	c_end = ARM_DWT_CYCCNT;
 	Serial.printf("the rest took %lu cycles\n", c_end-c_start);
+
+
+	c_start = ARM_DWT_CYCCNT;
+	void* test = extmem_malloc(256);
+	c_end = ARM_DWT_CYCCNT;
+	Serial.printf("theirs took %lu cycles\n", c_end-c_start);
+	fill(test, 0, 256);
+
+	extmem_free(test);
+
+	c_start = ARM_DWT_CYCCNT;
+	volatile void* test2 = extalloc::alloc(256);
+	c_end = ARM_DWT_CYCCNT;
+	Serial.printf("ours took %lu cycles\n", c_end-c_start);
+	fill(test2, 0, 256);
+	extalloc::free(test2);
 }
 
 

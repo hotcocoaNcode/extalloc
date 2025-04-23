@@ -2,8 +2,8 @@
 // Created by Ember Lee on 4/22/25.
 //
 
-#include "extalloc.h"
 #include <Arduino.h>
+#include "extalloc.h"
 
 extern "C" uint8_t external_psram_size;
 
